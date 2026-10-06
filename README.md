@@ -129,8 +129,8 @@ recreated at startup from base64 environment variables.
 
 ## Attribution
 
-This project was built with the help of an AI coding assistant running on **local**.
-It was created using **Ornith Q4 262k**.
+This project was built by an AI coding agent using a **local** model
+(Ornith Q4 262k) — everything ran locally, nothing was sent to the cloud.
 
 ## License
 
