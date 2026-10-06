@@ -1,0 +1,24 @@
+{
+  "name": "gmail-discord-embed",
+  "version": "1.0.0",
+  "description": "Bot Discord qui lit la liste de mails d'un compte Gmail et les affiche",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "monitor": "node index.js",
+    "test": "node index.js"
+  },
+  "keywords": [
+    "discord",
+    "discord.js",
+    "gmail",
+    "google-api"
+  ],
+  "license": "CC-BY-NC-SA-4.0",
+  "dependencies": {
+    "@googleapis/gmail": "^22.0.1",
+    "discord.js": "^14.16.3",
+    "dotenv": "^18.0.5"
+  }
+}

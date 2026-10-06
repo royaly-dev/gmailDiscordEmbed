@@ -1,0 +1,20 @@
+# Dépendances installées (réinstallées dans l'image)
+node_modules
+npm-debug.log
+
+# Secrets — NE JAMAIS intégrer à l'image
+.env
+credentials.json
+token.json
+
+# État local créé par le bot
+seen.json
+
+# Docs / config docker
+.git
+.gitignore
+README.md
+docker-compose.yml
+Dockerfile
+.dockerignore
+*.md
