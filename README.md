@@ -122,11 +122,6 @@ recreated at startup from base64 environment variables.
    The `entrypoint.sh` script decodes them into `credentials.json` and `token.json`
    before starting the bot.
 
-## Examples
-
-- `examples/gmail-list.js` — lists the N latest mails of an account (after the initial OAuth2 auth).
-- `index.js` — the main surveillance bot with the polling loop.
-
 ## Attribution
 
 This project was built by an AI coding agent using a **local** model
