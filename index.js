@@ -135,13 +135,17 @@ async function ensureAccountToken(accounts, index) {
 
   // No refresh token : launch the OAuth2 flow for this specific account.
   const label = (acc && acc.email) || `account #${index + 1}`;
-  console.log(`\n🔑 No token for ${label}. Open this URL to authorize access :`);
+  console.log(
+    `\n🔑 No token for ${label}. Open this URL to authorize access :`,
+  );
   console.log(generateAuthUrl());
   const code = (
     await prompt("Paste the redirect URL (or code) after authentication : ")
   ).trim();
   const redirectMatch = code.match(/[?&]code=([^&]+)/);
-  const { tokens } = await oauth2.getToken(redirectMatch ? redirectMatch[1] : code);
+  const { tokens } = await oauth2.getToken(
+    redirectMatch ? redirectMatch[1] : code,
+  );
   oauth2.setCredentials(tokens);
   accounts[index] = {
     ...tokens,
@@ -465,7 +469,9 @@ async function main() {
     }
     try {
       channels[email] = await resolveChannel(client, acc.discordChannelId);
-      console.log(`📺 ${email} -> ${channels[email].name} (${channels[email].id})`);
+      console.log(
+        `📺 ${email} -> ${channels[email].name} (${channels[email].id})`,
+      );
     } catch {
       console.warn(
         `⚠️ ${email} : Discord channel ${acc.discordChannelId} inaccessible — embed skipped.`,
@@ -513,8 +519,7 @@ async function main() {
         continue;
       }
 
-      const seen =
-        seenMap[acc.email] || (seenMap[acc.email] = new Set());
+      const seen = seenMap[acc.email] || (seenMap[acc.email] = new Set());
       const newIds = ids.filter((id) => !seen.has(id));
       for (const id of ids) seen.add(id);
       saveSeenMap(seenMap);
@@ -524,9 +529,7 @@ async function main() {
         continue;
       }
 
-      console.log(
-        `🆕 ${now()} — ${acc.email} : ${newIds.length} new mail(s).`,
-      );
+      console.log(`🆕 ${now()} — ${acc.email} : ${newIds.length} new mail(s).`);
       const mails = await getMailDetails(clients[i], newIds);
 
       for (const mail of mails) {
