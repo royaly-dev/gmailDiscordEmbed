@@ -1,15 +1,18 @@
-// Bot Discord qui surveille un compte Gmail toutes les 30 minutes.
+// Discord bot that monitors ONE OR MORE Gmail accounts every 30 minutes.
 //
-// Principe :
-//   1. Si aucun token.json n'existe, le flux OAuth2 est lancé une seule fois
-//      pour que tu autorises l'accès à ton Gmail (comme dans l'exemple).
-//   2. Une boucle tourne toutes les 30 minutes : elle récupère la liste des
-//      mails, la compare à ce qui a déjà été vu, et pour chaque NOUVEAU mail
-//      elle envoie un embed Discord (sujet + début du corps + infos) avec
-//      deux boutons "Gardé" / "Supprimé" (non fonctionnels pour l'instant).
+// How it works:
+//   1. token.json now holds an ARRAY of accounts (instead of a single token).
+//      Each entry carries its OAuth tokens, its email address, AND the Discord
+//      channel dedicated to it. You can add as many as you want.
+//   2. At startup, for every account WITHOUT a valid token, the OAuth2 flow is
+//      launched to authorize it (like in the example).
+//   3. A loop runs every 30 minutes: for EACH account it fetches the unread
+//      inbox mails, compares them with what was already seen (per account), and
+//      for every NEW mail it posts a Discord embed to that account's dedicated
+//      channel, with two "Keep" / "Remove" buttons.
 //
-// Configuration : voir .env.example (DISCORD_TOKEN, GMAIL_ACCOUNT, DISCORD_CHANNEL_ID)
-// Lancement :  node index.js
+// Configuration: see .env.example (DISCORD_TOKEN)
+// Launch:  node index.js
 
 import process from "node:process";
 import "dotenv/config";
@@ -37,15 +40,17 @@ const CREDENTIALS_PATH = resolve(root, "credentials.json");
 const TOKEN_PATH = resolve(root, "token.json");
 const SEEN_PATH = resolve(root, "seen.json");
 const INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
-const MAX_RESULTS = 50; // nombre de mails récupérés à chaque tour
-
-// ---------------------------------------------------------------------------
-// Fichiers de config / auth
-// ---------------------------------------------------------------------------
+const MAX_RESULTS = 50; // number of mails fetched per cycle
 
 const env = process.env;
 
-/** Lit les identifiants OAuth2 (desktop) depuis credentials.json. */
+const now = () => new Date().toLocaleTimeString();
+
+// ---------------------------------------------------------------------------
+// Config / auth files
+// ---------------------------------------------------------------------------
+
+/** Reads OAuth2 (desktop) secrets from credentials.json. */
 function loadClientSecrets() {
   const secrets = JSON.parse(readFileSync(CREDENTIALS_PATH, "utf-8"));
 
@@ -58,41 +63,115 @@ function loadClientSecrets() {
   };
 }
 
-/** Relit le secret à chaque tour au cas où le fichier change. */
-async function getClient() {
+/**
+ * Generates the Google authorization URL (offline + consent -> returns a
+ * refresh_token). Used on first launch and whenever Google revokes a token.
+ */
+function generateAuthUrl() {
   const { client_id, client_secret, redirect_uris } = loadClientSecrets();
   const oauth2 = new OAuth2Client(client_id, client_secret, redirect_uris[0]);
-
-  if (existsSync(TOKEN_PATH)) {
-    oauth2.setCredentials(JSON.parse(readFileSync(TOKEN_PATH, "utf-8")));
-    return oauth2;
-  }
-
-  const url = oauth2.generateAuthUrl({
+  return oauth2.generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
     scope: ["https://www.googleapis.com/auth/gmail.modify"],
   });
-  console.log(
-    "Aucun token trouvé. Ouvre cette URL pour autoriser l'acces a ton Gmail :\n",
-    url,
-  );
+}
+
+/** Returns true if an error comes from a revoked/expired token on Google's side. */
+function isTokenRevoked(err) {
+  const text = String((err && (err.error || err.message || "")) || "");
+  return /invalid_grant|revok|expired/i.test(text);
+}
+
+/**
+ * Loads accounts from token.json.
+ * Returns an array of accounts, each with:
+ *   - OAuth fields (access_token / refresh_token / expiry_date / ...)
+ *   - email              : the Gmail address (readable identifier)
+ *   - discordChannelId   : the Discord channel to post to for this account
+ */
+function loadAccounts() {
+  try {
+    if (!existsSync(TOKEN_PATH)) return [];
+    const raw = JSON.parse(readFileSync(TOKEN_PATH, "utf-8"));
+    // token.json is always an array of accounts (multi-account).
+    const arr = Array.isArray(raw) ? raw : [raw];
+    return arr.map((acc, i) => ({
+      ...acc,
+      email: typeof acc.email === "string" ? acc.email : null,
+      discordChannelId:
+        typeof acc.discordChannelId === "string" ? acc.discordChannelId : null,
+      _index: i, // internal marker, stripped before saving
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/** Saves accounts into token.json (stripping internal markers). */
+function saveAccounts(accounts) {
+  try {
+    const clean = accounts.map(({ _index, ...acc }) => acc);
+    writeFileSync(TOKEN_PATH, JSON.stringify(clean, null, 2));
+  } catch (err) {
+    console.error(`⚠️ could not save token.json : ${err.message}`);
+  }
+}
+
+/**
+ * Ensures an account has a valid OAuth token (index within the accounts array).
+ * If the account already has a refresh_token, its credentials are reused.
+ * Otherwise the OAuth2 flow is launched for that account and the token saved.
+ */
+async function ensureAccountToken(accounts, index) {
+  const { client_id, client_secret, redirect_uris } = loadClientSecrets();
+  const oauth2 = new OAuth2Client(client_id, client_secret, redirect_uris[0]);
+  const acc = accounts[index];
+
+  if (acc && acc.refresh_token) {
+    oauth2.setCredentials(acc);
+    return oauth2;
+  }
+
+  // No refresh token : launch the OAuth2 flow for this specific account.
+  const label = (acc && acc.email) || `account #${index + 1}`;
+  console.log(`\n🔑 No token for ${label}. Open this URL to authorize access :`);
+  console.log(generateAuthUrl());
   const code = (
-    await prompt(
-      "Colle ici l'URL de redirection (ou le code) apres authentification : ",
-    )
+    await prompt("Paste the redirect URL (or code) after authentication : ")
   ).trim();
   const redirectMatch = code.match(/[?&]code=([^&]+)/);
-  const { tokens } = await oauth2.getToken(
-    redirectMatch ? redirectMatch[1] : code,
-  );
+  const { tokens } = await oauth2.getToken(redirectMatch ? redirectMatch[1] : code);
   oauth2.setCredentials(tokens);
-  writeFileSync(TOKEN_PATH, JSON.stringify(tokens, null, 2));
-  console.log("Token sauvegarde dans token.json\n");
+  accounts[index] = {
+    ...tokens,
+    email: (acc && acc.email) || label,
+    discordChannelId: (acc && acc.discordChannelId) || null,
+  };
+  saveAccounts(accounts);
+  console.log(`✅ token saved for ${accounts[index].email}\n`);
   return oauth2;
 }
 
-/** Helper de lecture clavier (promesse). */
+/**
+ * Loads accounts; if there are none, creates the first one by asking for the
+ * email and its dedicated Discord channel (fresh start).
+ */
+async function loadOrInitAccounts() {
+  const accounts = loadAccounts();
+  if (accounts.length > 0) return accounts;
+
+  console.log("📭 No account configured in token.json.");
+  const email = (await prompt("Enter the Gmail address to monitor : ")).trim();
+  const channelId = (
+    await prompt("ID of the Discord channel dedicated to this account : ")
+  ).trim();
+  const created = [{ email, discordChannelId: channelId || null }];
+  saveAccounts(created);
+  return created;
+}
+
+/** Key-line reader helper (promise). */
 function prompt(question) {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   return rl.question(question).then((answer) => {
@@ -105,19 +184,19 @@ function prompt(question) {
 // Gmail
 // ---------------------------------------------------------------------------
 
-/** Renvoie la liste des ID des N derniers mails. */
+/** Returns the list of IDs of the last N mails. */
 async function fetchMailIds(oauth2) {
   const client = gmail({ version: "v1", auth: oauth2 });
   const res = await client.users.messages.list({
     userId: "me",
-    query: "in:inbox unread:True", // inbox ET non-lus seulement
+    query: "in:inbox unread:True", // inbox AND unread only
     maxResults: MAX_RESULTS,
     orderBy: "reverseTimeOrder",
   });
   return (res.data.messages ?? []).map((m) => m.id);
 }
 
-/** Extrait le corps textuel d'un message (gère le multipart / base64url). */
+/** Decodes a message body (handles multipart / base64url). */
 function base64UrlDecode(str) {
   let s = String(str).replace(/-/g, "+").replace(/_/g, "/");
   while (s.length % 4) s += "=";
@@ -132,7 +211,7 @@ function extractBody(payload) {
   if (type.includes("multipart")) {
     for (const part of payload.parts ?? []) {
       const body = extractBody(part);
-      if (body) return body; // on prend le premier (généralement text/plain en premier)
+      if (body) return body; // take the first one (usually text/plain first)
     }
     return "";
   }
@@ -145,12 +224,12 @@ function extractBody(payload) {
     text = "";
   }
   if (subtype === "html") {
-    text = text.replace(/<[^>]*>/g, " "); // on retire les balises HTML
+    text = text.replace(/<[^>]*>/g, " "); // strip HTML tags
   }
   return text.replace(/\s+/g, " ").trim();
 }
 
-/** Extrait la 1re adresse email trouvée dans une chaîne. */
+/** Extracts the first email address found in a string. */
 function extractEmail(str) {
   const m = String(str || "").match(
     /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/,
@@ -158,7 +237,7 @@ function extractEmail(str) {
   return m ? m[0].toLowerCase() : "";
 }
 
-/** Récupère l'adresse du destinataire (celle des headers Delivered-To). */
+/** Gets the recipient address (the Delivered-To headers). */
 function getRecipientEmail(messages) {
   for (const m of messages) {
     const delivered =
@@ -171,7 +250,7 @@ function getRecipientEmail(messages) {
   return "";
 }
 
-/** Récupère les en-têtes + corps de chaque mail (format complet). */
+/** Gets headers + body of each mail (full format). */
 async function getMailDetails(oauth2, ids) {
   const client = gmail({ version: "v1", auth: oauth2 });
   const messages = [];
@@ -184,14 +263,14 @@ async function getMailDetails(oauth2, ids) {
     messages.push(res.data);
   }
 
-  // On ne garde QUE les mails réellement adressés à ce compte
-  // (exclut CC, bcc, listes de diffusion, mails pour d'autres personnes).
+  // Only keep mails actually addressed to this account
+  // (excludes CC, bcc, mailing lists, mails for other people).
   const myEmail = getRecipientEmail(messages);
 
   const details = [];
   for (const message of messages) {
     const payload = message.payload || {};
-    const headers = payload.headers || []; // <- les headers sont dans payload
+    const headers = payload.headers || []; // <- headers are in payload
     const find = (name) =>
       headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ??
       "";
@@ -200,9 +279,9 @@ async function getMailDetails(oauth2, ids) {
 
     details.push({
       id: message.id,
-      subject: find("Subject") || "(sans sujet)",
-      from: find("From") || "(sans expéditeur)",
-      date: find("Date") || "(sans date)",
+      subject: find("Subject") || "(no subject)",
+      from: find("From") || "(no sender)",
+      date: find("Date") || "(no date)",
       body: extractBody(payload),
     });
   }
@@ -213,41 +292,43 @@ async function getMailDetails(oauth2, ids) {
 // Discord
 // ---------------------------------------------------------------------------
 
-/** Construit l'embed d'un nouveau mail. */
+/** Builds an embed for a new mail. */
 function buildEmbed(mail) {
   const subject =
     mail.subject.length > 250 ? `${mail.subject.slice(0, 250)}…` : mail.subject;
-  const description = mail.body.trim() || "(aucun corps de message)";
+  const description = mail.body.trim() || "(no message body)";
   const bodyPreview =
     description.length > 400 ? `${description.slice(0, 400)}…` : description;
 
   return new EmbedBuilder()
-    .setTitle(`📬 Nouveau mail : ${subject}`)
+    .setTitle(`📬 New mail : ${subject}`)
     .setDescription(
-      `**De :** ${mail.from}\n**Le :** ${mail.date}\n**Objet :** ${mail.subject}\n\n${bodyPreview}`,
+      `**From :** ${mail.from}\n**On :** ${mail.date}\n**Subject :** ${mail.subject}\n\n${bodyPreview}`,
     )
     .setColor(0x2f3136)
     .setTimestamp();
 }
 
-/** Ligne de boutons "Gardé" / "Supprimé" (non fonctionnels pour l'instant). */
+/** Row of "Keep" / "Remove" buttons. */
 function buildButtonRow() {
   const keep = new ButtonBuilder()
-    .setLabel("Gardé")
+    .setLabel("Keep")
     .setCustomId("mail_keep")
     .setEmoji("✅")
     .setStyle(ButtonStyle.Success);
   const remove = new ButtonBuilder()
-    .setLabel("Supprimé")
+    .setLabel("Remove")
     .setCustomId("mail_delete")
     .setEmoji("🗑️")
     .setStyle(ButtonStyle.Danger);
   return new ActionRowBuilder().addComponents(keep, remove);
 }
 
-/** Trouve le canal où poster les embeds. */
-async function resolveChannel(client) {
-  const channelId = env.DISCORD_CHANNEL_ID;
+/**
+ * Finds where to post for a given account, from its dedicated channel.
+ * Fallback : look for the first text channel in the server.
+ */
+async function resolveChannel(client, channelId) {
   if (channelId) {
     const ch = await client.channels.fetch(channelId).catch(() => null);
     if (ch?.isTextBased()) return ch;
@@ -258,80 +339,113 @@ async function resolveChannel(client) {
     if (text) return text;
   }
   throw new Error(
-    "Aucun canal Discord accessible. Ajoute DISCORD_CHANNEL_ID à ton .env.",
+    `No accessible Discord channel for ${channelId}. Add discordChannelId to this account in token.json.`,
   );
 }
 
 // ---------------------------------------------------------------------------
-// Persistance des ID déjà vus (évite de renvoyer les mêmes mails au redémarrage)
+// Persist already-seen IDs (avoid re-sending the same mails on restart)
+// Stored PER-ACCOUNT : { "email@gmail.com": [id, ...] }
 // ---------------------------------------------------------------------------
 
-/** Charge les ID déjà vus depuis seen.json (retorne un Set vide si absent). */
-function loadSeenIds() {
+/** Loads already-seen IDs from seen.json (empty object if missing). */
+function loadSeenMap() {
   try {
-    if (!existsSync(SEEN_PATH)) return new Set();
-    return new Set(JSON.parse(readFileSync(SEEN_PATH, "utf-8")));
+    if (!existsSync(SEEN_PATH)) return {};
+    const raw = JSON.parse(readFileSync(SEEN_PATH, "utf-8"));
+    const map = {};
+    for (const [email, ids] of Object.entries(raw)) {
+      map[email] = new Set(Array.isArray(ids) ? ids : []);
+    }
+    return map;
   } catch {
-    return new Set();
+    return {};
   }
 }
 
-/** Sauvegarde les ID déjà vus dans seen.json. */
-function saveSeenIds(seenIds) {
+/** Saves already-seen IDs into seen.json (per-account format). */
+function saveSeenMap(map) {
   try {
-    writeFileSync(SEEN_PATH, JSON.stringify([...seenIds]));
+    const obj = {};
+    for (const [email, ids] of Object.entries(map)) {
+      obj[email] = [...ids];
+    }
+    writeFileSync(SEEN_PATH, JSON.stringify(obj, null, 2));
   } catch (err) {
-    console.error(`⚠️ impossible de sauvegarder seen.json : ${err.message}`);
+    console.error(`⚠️ could not save seen.json : ${err.message}`);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Boucle principale
+// Main loop
 // ---------------------------------------------------------------------------
 
 async function main() {
-  const oauth2 = await getClient();
   const token = env.DISCORD_TOKEN;
-  if (!token) throw new Error("DISCORD_TOKEN est manquant dans ton .env.");
+  if (!token) throw new Error("DISCORD_TOKEN is missing from your .env.");
 
+  // 1. Load / authorize each Gmail account.
+  let accounts = await loadOrInitAccounts();
+  const clients = []; // OAuth client per account (indexed)
+  for (let i = 0; i < accounts.length; i++) {
+    clients[i] = await ensureAccountToken(accounts, i);
+  }
+  console.log(
+    `📬 ${accounts.length} account(s) configured : ${accounts
+      .map((a) => a.email || "(no email)")
+      .join(", ")}`,
+  );
+
+  // 2. Discord client (shared across all Gmail accounts).
   const client = new Client({
     intents: [GatewayIntentBits.Guilds],
     partials: [Partials.Channel],
   });
 
-  let readyPromise;
   client.once(Events.ClientReady, (c) => {
-    console.log(`✅ Connecté en tant que ${c.user.tag}`);
+    console.log(`✅ Connected as ${c.user.tag}`);
   });
 
-  // Gestion des boutons "Gardé" / "Supprimé".
+  // Handle "Keep" / "Remove" buttons.
+  // messageToMail links a Discord message -> { mailId, oauth2 } of the right account.
+  const messageToMail = new Map();
   client.on(Events.InteractionCreate, async (interaction) => {
     if (!interaction.isButton()) return;
 
-    const mailId = messageToMail.get(interaction.message.id);
+    const entry = messageToMail.get(interaction.message.id);
 
     if (interaction.customId === "mail_keep") {
-      // "Gardé" : on supprime juste l'embed Discord.
+      // "Keep" : just delete the Discord embed.
       await interaction.message.delete();
       await interaction.reply({
-        content: "✅ Conservé",
+        content: "✅ Kept",
         flags: MessageFlags.Ephemeral,
       });
       return;
     }
 
     if (interaction.customId === "mail_delete") {
-      // "Supprimé" : on supprime l'embed + on déplace le mail dans la corbeille.
+      // "Remove" : delete the embed + move the mail to trash.
       try {
-        const client = gmail({ version: "v1", auth: oauth2 });
-        await client.users.messages.trash({ userId: "me", id: mailId });
-        console.log(`   🗑️ déplacé dans la corbeille : ${mailId}`);
+        if (!entry) {
+          await interaction.reply({
+            content: "ℹ️ This mail is no longer in memory.",
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+        const gmailClient = gmail({ version: "v1", auth: entry.oauth2 });
+        await gmailClient.users.messages.trash({
+          userId: "me",
+          id: entry.mailId,
+        });
+        console.log(`   🗑️ moved to trash : ${entry.mailId}`);
       } catch (err) {
-        console.error(`   ⚠️ erreur corbeille pour ${mailId} : ${err.message}`);
+        console.error(`   ⚠️ trash error : ${err.message}`);
       }
       await interaction.message.delete();
       await interaction.reply({
-        content: "🗑️ Supprimé (déplacé dans la corbeille)",
+        content: "🗑️ Removed (moved to trash)",
         flags: MessageFlags.Ephemeral,
       });
     }
@@ -339,33 +453,81 @@ async function main() {
 
   await client.login(token);
 
-  const channel = await resolveChannel(client);
-  console.log(`📺 Embeds envoyés sur : ${channel.name} (${channel.id})\n`);
-
-  // ID déjà vus → chargés depuis seen.json pour survivre à un redémarrage.
-  const seenIds = loadSeenIds();
-
-  // Lie un message Discord (id) à un ID Gmail, pour les boutons.
-  const messageToMail = new Map();
-
-  const runOnce = async () => {
+  // 3. Resolve the dedicated channel of each account.
+  const channels = {}; // email -> Discord channel
+  for (const acc of accounts) {
+    const email = acc.email || "(no email)";
+    if (!acc.discordChannelId) {
+      console.warn(
+        `⚠️ ${email} : no discordChannelId — no embed sent for this account.`,
+      );
+      continue;
+    }
     try {
-      const ids = await fetchMailIds(oauth2);
-      const newIds = ids.filter((id) => !seenIds.has(id));
-      for (const id of ids) seenIds.add(id);
-      saveSeenIds(seenIds);
+      channels[email] = await resolveChannel(client, acc.discordChannelId);
+      console.log(`📺 ${email} -> ${channels[email].name} (${channels[email].id})`);
+    } catch {
+      console.warn(
+        `⚠️ ${email} : Discord channel ${acc.discordChannelId} inaccessible — embed skipped.`,
+      );
+    }
+  }
+
+  // 4. Already-seen IDs -> loaded from seen.json (per-account) to survive a restart.
+  const seenMap = loadSeenMap();
+
+  // Report a token revocation only ONCE (avoid spamming errors every 30 min).
+  const revokedAccounts = new Set();
+
+  // 5. Loop over every account on each cycle.
+  const runCycle = async () => {
+    for (let i = 0; i < accounts.length; i++) {
+      const acc = accounts[i];
+      const channel = channels[acc.email];
+      if (!channel) continue; // no valid channel for this account
+
+      let ids;
+      try {
+        ids = await fetchMailIds(clients[i]);
+        // token works again -> clear any possible "revoked" marker
+        revokedAccounts.delete(acc.email);
+      } catch (err) {
+        // Google revoked/expired the refresh_token -> handle it cleanly.
+        if (isTokenRevoked(err)) {
+          if (revokedAccounts.has(acc.email)) {
+            continue; // already reported, don't spam every 30 min
+          }
+          revokedAccounts.add(acc.email);
+          console.log(
+            `\n🔒 ${acc.email} : the Gmail token was revoked/expired by Google ` +
+              `(invalid_grant). Re-authenticate it once via this URL :`,
+          );
+          console.log(generateAuthUrl());
+          console.log(
+            "   (Once done, the bot resumes work on the next cycle.)\n",
+          );
+          continue;
+        }
+        // Other error (network, quota, ...) -> retry next cycle.
+        console.error(`⚠️ error for ${acc.email} : ${err.message}`);
+        continue;
+      }
+
+      const seen =
+        seenMap[acc.email] || (seenMap[acc.email] = new Set());
+      const newIds = ids.filter((id) => !seen.has(id));
+      for (const id of ids) seen.add(id);
+      saveSeenMap(seenMap);
 
       if (newIds.length === 0) {
-        console.log(
-          `⏳ ${new Date().toLocaleTimeString()} — aucun nouveau mail.`,
-        );
-        return;
+        console.log(`⏳ ${now()} — ${acc.email} : no new mail.`);
+        continue;
       }
 
       console.log(
-        `🆕 ${new Date().toLocaleTimeString()} — ${newIds.length} nouveau(x) mail(s).`,
+        `🆕 ${now()} — ${acc.email} : ${newIds.length} new mail(s).`,
       );
-      const mails = await getMailDetails(oauth2, newIds);
+      const mails = await getMailDetails(clients[i], newIds);
 
       for (const mail of mails) {
         try {
@@ -374,27 +536,25 @@ async function main() {
             embeds: [buildEmbed(mail)],
             components: [buildButtonRow()],
           });
-          messageToMail.set(sent.id, mail.id);
-          console.log(`   → envoyé : ${mail.subject}`);
+          messageToMail.set(sent.id, { mailId: mail.id, oauth2: clients[i] });
+          console.log(`   → sent : ${mail.subject}`);
         } catch (err) {
           console.error(
-            `   ⚠️ échop envoyeur pour ${mail.subject} : ${err.message}`,
+            `   ⚠️ send error for ${mail.subject} : ${err.message}`,
           );
         }
       }
-    } catch (err) {
-      console.error(`⚠️ erreur lors du tour : ${err.message}`);
     }
   };
 
-  await runOnce(); // premier tour immédiat
-  setInterval(runOnce, INTERVAL_MS); // puis toutes les 30 minutes
+  await runCycle(); // first cycle immediately
+  setInterval(runCycle, INTERVAL_MS); // then every 30 minutes
 
-  // Garde le process vivant.
+  // Keep the process alive.
   await new Promise(() => {});
 }
 
 main().catch((err) => {
-  console.error("Erreur critique :", err.message);
+  console.error("Critical error :", err.message);
   process.exitCode = 1;
 });

@@ -1,18 +1,15 @@
 # ---------------------------------------------------------------------------
-# Déplacement LOCAL du bot (local dev).
-# En PROD (Dockploy), préférer le Dockerfile + variables d'environnement
-# (CREDENTIALS_JSON / TOKEN_JSON en base64) — voir README.
+# LOCAL bot deployment (local dev).
+# For PROD (Dockploy), prefer the Dockerfile + environment variables
+# (CREDENTIALS_JSON / TOKEN_JSON in base64) — see README.
 #
-# Lance :  docker compose up --build
+# Launch:  docker compose up --build
 # ---------------------------------------------------------------------------
 services:
   mail-bot:
     build: .
     image: gmail-discord-embed:latest
     restart: unless-stopped
-    environment:
-      DISCORD_TOKEN: ${DISCORD_TOKEN:-}
-      DISCORD_CHANNEL_ID: ${DISCORD_CHANNEL_ID:-}
     volumes:
       - ./credentials.json:/app/credentials.json:ro
       - ./token.json:/app/token.json:ro
